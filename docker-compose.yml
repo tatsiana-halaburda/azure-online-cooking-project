@@ -1,0 +1,28 @@
+services:
+  inventory:
+    platform: linux/amd64
+    build: .
+    command: uvicorn services.inventory.main:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    env_file: .env
+
+  ordering:
+    platform: linux/amd64
+    build: .
+    command: uvicorn services.ordering.main:app --host 0.0.0.0 --port 8002
+    ports:
+      - "8002:8002"
+    env_file: .env
+    environment:
+      INVENTORY_SERVICE_URL: http://inventory:8001
+    depends_on:
+      - inventory
+
+  feedback:
+    platform: linux/amd64
+    build: .
+    command: uvicorn services.feedback.main:app --host 0.0.0.0 --port 8003
+    ports:
+      - "8003:8003"
+    env_file: .env
