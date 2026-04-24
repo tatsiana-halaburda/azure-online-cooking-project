@@ -8,24 +8,24 @@ Three local FastAPI apps talk to **one** Azure SQL database and use **separate s
 
 Ports: **8001** inventory, **8002** ordering, **8003** feedback.
 
-**Practice 3:** Ordering sends an **`order_created`** JSON message to an **Azure Service Bus queue** after each successful `POST /orders`. Inventory runs a **background poller** (configurable interval) that receives messages with a separate SAS connection string. See [Practice 3: Azure Service Bus queue](#practice-3-azure-service-bus-queue).
+**Practice 3:** After `POST /orders`, Ordering sends `order_created` JSON to an Azure Service Bus queue (send SAS). Inventory polls the queue on an interval (listen SAS) and exposes `GET /service-bus/recent-events`.
 
 ## Environment
 
-Copy `.env.example` to `.env` and fill in values:
+Copy `.env.example` → `.env`. Connection strings: one line each; single quotes recommended (e.g. `'Endpoint=sb://…;SharedAccessKeyName=…;SharedAccessKey=…'`).
 
-```env
-DB_USERNAME=name
-DB_PASSWORD=password
-DB_SERVER=tcp:yourserver.database.windows.net
-DB_DATABASE=yourdb
+| Variable | Required | Used by |
+|----------|----------|---------|
+| `DB_SERVER`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD` | Yes (unless SQL string below) | All services with DB |
+| `AZURE_SQL_CONNECTION_STRING` | No | Overrides `DB_*` when set |
+| `DB_ODBC_DRIVER` | No | Default `ODBC Driver 18 for SQL Server` |
+| `INVENTORY_SERVICE_URL` | No | Ordering → Inventory HTTP; default `http://localhost:8001`. Compose sets `http://inventory:8001` for ordering |
+| `AZURE_SERVICEBUS_SEND_CONNECTION_STRING` | Optional | Ordering — send after `POST /orders` |
+| `AZURE_SERVICEBUS_LISTEN_CONNECTION_STRING` | Optional | Inventory — background receive |
+| `AZURE_SERVICEBUS_QUEUE_NAME` | Optional | Both — same queue; required with either SAS line above |
+| `AZURE_SERVICEBUS_POLL_INTERVAL_SECONDS` | No | Inventory — seconds between receive attempts (default **5**) |
 
-INVENTORY_SERVICE_URL=http://localhost:8001
-```
-
-Optional: `AZURE_SQL_CONNECTION_STRING` (if set, it overrides `DB_*`). Optional: `DB_ODBC_DRIVER`.
-
-For Practice 3, also set `AZURE_SERVICEBUS_SEND_CONNECTION_STRING`, `AZURE_SERVICEBUS_LISTEN_CONNECTION_STRING`, and `AZURE_SERVICEBUS_QUEUE_NAME` (see section below).
+If Service Bus vars are omitted, orders still save; Inventory skips the listener. Failed sends are logged only.
 
 ## Azure SQL setup (once per database)
 
@@ -39,34 +39,7 @@ Run the scripts **in order** against the same DB as in `.env` (Azure Data Studio
 
 There is **no** `db-init` container in this repo — apply SQL manually (or wire your own init job).
 
-## Practice 3: Azure Service Bus queue
-
-**Goal:** two services communicate through a shared queue—**send** on a business trigger, **receive** on a timer—using **different connection strings** (write vs read SAS) for least privilege.
-
-| Piece | Service | Trigger / mode |
-|--------|---------|----------------|
-| **Send** | Ordering (`services/ordering`) | After a successful **`POST /orders`** (message includes `event`, `order_id`, `status`, `total_cost`, `notes`, `item_count`). |
-| **Receive** | Inventory (`services/inventory`) | Background loop every **`AZURE_SERVICEBUS_POLL_INTERVAL_SECONDS`** (default **5**). Messages are completed after handling; the last **50** payloads are kept in memory for demos. |
-
-**Environment variables** (see `.env.example`):
-
-- `AZURE_SERVICEBUS_SEND_CONNECTION_STRING` — SAS policy with **Send** (used only by Ordering).
-- `AZURE_SERVICEBUS_LISTEN_CONNECTION_STRING` — SAS policy with **Listen** (used only by Inventory).
-- `AZURE_SERVICEBUS_QUEUE_NAME` — queue name (must match the queue both apps use).
-- `AZURE_SERVICEBUS_POLL_INTERVAL_SECONDS` — optional; seconds between receive attempts in Inventory.
-
-Use **one line per connection string** in `.env`; single quotes around the value are recommended (see `.env.example` comments).
-
-**Verify locally**
-
-1. Start Inventory, then Ordering (or `docker compose up --build -d` with `.env` present).
-2. `GET http://127.0.0.1:8001/health` — includes `"service_bus_listener": true` when listen connection string and queue name are set for Inventory.
-3. `POST http://127.0.0.1:8002/orders` with a valid body (seed ingredient IDs in `sql/05_seed.sql`).
-4. Wait at least one poll interval, then `GET http://127.0.0.1:8001/service-bus/recent-events` — expect `order_created` entries.
-
-If send or listen env vars are missing, Ordering still persists orders; Inventory skips starting the listener. Send failures are logged and do not roll back the SQL transaction.
-
-**Code:** `libs/service_bus.py` (send), `libs/service_bus_listener.py` (async receive loop). Dependency: `azure-servicebus` in `requirements.txt`.
+**Practice 3 check:** `GET http://127.0.0.1:8001/health` → `service_bus_listener: true` when listen SAS + queue name are set; `POST http://127.0.0.1:8002/orders`; after ≥ poll interval, `GET http://127.0.0.1:8001/service-bus/recent-events`. Code: `libs/service_bus.py`, `libs/service_bus_listener.py`.
 
 ## API
 
@@ -74,14 +47,12 @@ Base: `http://127.0.0.1` — **8001** inventory, **8002** ordering, **8003** fee
 
 **Check endpoints**
 
-- `GET http://127.0.0.1:8001/health` — Inventory health includes `service_bus_listener` when Practice 3 env is set
-- `GET http://127.0.0.1:8002/health`
-- `GET http://127.0.0.1:8003/health`
+- `GET …/8001/health` · `8002` · `8003`
 
 **Inventory (8001)**
 
-- `GET /health`
-- `GET /service-bus/recent-events` — last messages read from the Service Bus queue (in-memory; Practice 3)
+- `GET /health` — includes `service_bus_listener` (Practice 3)
+- `GET /service-bus/recent-events` — last queue payloads (in-memory, max 50)
 - `GET /ingredients` — query: `category`, `name_contains`, `include_inactive`
 - `POST /ingredients`
 - `GET /ingredients/{ingredient_id}`
@@ -102,7 +73,7 @@ Base: `http://127.0.0.1` — **8001** inventory, **8002** ordering, **8003** fee
 
 - `GET /health`
 - `GET /orders` — query: `status`
-- `POST /orders` — body includes line items; sets `TotalCost` from lines; enqueues **`order_created`** to Service Bus when send env is configured (Practice 3)
+- `POST /orders` — line items, `TotalCost`; enqueues `order_created` if send connection string + queue name set
 - `GET /orders/{order_id}` — enriched with ingredient **names** via Inventory HTTP (**503** if Inventory fails)
 - `PUT /orders/{order_id}`
 - `DELETE /orders/{order_id}` — deletes reservations, items, then order
@@ -133,29 +104,13 @@ Base: `http://127.0.0.1` — **8001** inventory, **8002** ordering, **8003** fee
 
 ## Docker run (recommended)
 
-1. Start **Docker Desktop**.
-
-2. Build images:
-
-```bash
-docker compose build
-```
-
-3. After SQL scripts are applied on Azure SQL, start all APIs (rebuild if dependencies changed, e.g. after adding Service Bus):
+Docker Desktop on, repo root, `.env` with DB (and Service Bus if Practice 3):
 
 ```bash
 docker compose up --build -d
 ```
 
-Compose sets `INVENTORY_SERVICE_URL=http://inventory:8001` for **ordering** so it can reach inventory inside the network.
-
-4. Try the routes in **[API](#api)** (seed GUIDs are in `sql/05_seed.sql`).
-
-5. Stop:
-
-```bash
-docker compose down
-```
+Compose sets `INVENTORY_SERVICE_URL=http://inventory:8001` for ordering. Stop: `docker compose down`. Seed GUIDs: `sql/05_seed.sql`.
 
 ## Local run (without Docker)
 
