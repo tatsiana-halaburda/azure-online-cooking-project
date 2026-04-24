@@ -9,6 +9,7 @@ import httpx
 import pyodbc
 from fastapi import FastAPI, HTTPException, Query, status
 from libs.db import cursor, transaction
+from libs.service_bus import send_json_message
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -223,7 +224,18 @@ def create_order(body: OrderCreate) -> OrderSummary:
                 """,
                 (str(iid), str(oid), str(it.ingredient_id), it.quantity, it.unit_price),
             )
-    return get_order_summary(oid)
+    summary = get_order_summary(oid)
+    send_json_message(
+        {
+            "event": "order_created",
+            "order_id": str(oid),
+            "status": body.status,
+            "total_cost": total,
+            "notes": body.notes,
+            "item_count": len(body.items),
+        }
+    )
+    return summary
 
 
 def get_order_summary(order_id: uuid.UUID) -> OrderSummary:

@@ -1,16 +1,37 @@
+import asyncio
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Any
 
 import pyodbc
 from fastapi import FastAPI, HTTPException, Query, status
+from libs import service_bus as service_bus_config
 from libs.db import cursor
+from libs.service_bus_listener import poll_queue_forever, recent_events
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Inventory Service", version="1.0.0")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    stop = asyncio.Event()
+    task: asyncio.Task[None] | None = None
+    if service_bus_config.listen_connection_string() and service_bus_config.queue_name():
+        task = asyncio.create_task(poll_queue_forever(stop))
+    yield
+    stop.set()
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="Inventory Service", version="1.0.0", lifespan=_lifespan)
 
 
 def _programming_schema_gone(exc: pyodbc.ProgrammingError) -> bool:
@@ -62,10 +83,17 @@ def health() -> dict[str, Any]:
         with cursor() as cur:
             cur.execute("SELECT 1")
             cur.fetchone()
-        return {"status": "ok"}
+        sb_on = bool(service_bus_config.listen_connection_string() and service_bus_config.queue_name())
+        return {"status": "ok", "service_bus_listener": sb_on}
     except Exception as exc:
         logger.exception("Database health check failed")
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
+
+
+@app.get("/service-bus/recent-events")
+def service_bus_recent_events() -> dict[str, Any]:
+    """Last messages received from the queue (in-memory; for local demos)."""
+    return {"events": recent_events()}
 
 
 @app.get("/ingredients", response_model=list[Ingredient])
