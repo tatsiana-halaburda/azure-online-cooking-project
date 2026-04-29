@@ -1,5 +1,7 @@
 # Azure Practice 2 & 3 — API-first (Option V)
 
+**Split service repositories** (same codebase, one service per repo): [inventory-service](https://github.com/tatsiana-halaburda/inventory-service), [ordering-service](https://github.com/tatsiana-halaburda/ordering-service), [feedback-service](https://github.com/tatsiana-halaburda/feedback-service). Sibling folders under this workspace: `../inventory-service`, `../ordering-service`, `../feedback-service`.
+
 Three local FastAPI apps talk to **one** Azure SQL database and use **separate schemas** (no cross-schema SQL joins for names; Ordering calls Inventory over HTTP):
 
 - **Inventory** (`services/inventory`) → `[Tanya_Inventory]` — `Warehouses`, `Ingredients`, `Stock`
